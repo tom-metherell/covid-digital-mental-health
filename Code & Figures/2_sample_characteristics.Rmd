@@ -1,0 +1,214 @@
+---
+title: "2_sample_characteristics"
+author: "Thomas E. Metherell"
+date: "06/10/2021"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+This script reports the sample characteristics for our study of digital exclusion and adolescent mental health during the COVID-19 pandemic in the United Kingdom.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Dependencies
+We start by loading the necessary dependencies.
+
+```{r dependencies}
+library(tidyverse)
+library(magrittr)
+```
+
+# Loading the data
+We can now load the wide dataset.
+
+```{r load_data}
+# Loading wide dataset
+data_wide <- read.csv("Data/Cleaned/data_wide.csv", quote = "")
+```
+
+# Reporting sample characteristics
+Below are selected summaries of sample characteristics. Some numbers are suppressed to protect individual participant identities.
+
+``` {r sample_characteristics_1, echo = FALSE, results = "asis"}
+# Number of participants with CV8 longitudinal weight
+data_wide <- data_wide[!is.na(data_wide$betayth_lw_CV8),]
+cat(paste("Number of participants with CV8 longitudinal weight:", nrow(data_wide), "\n\n"))
+
+# Number of participants also with at least one Total Difficulties score
+data_wide <- data_wide[!is.na(data_wide$ypsdqtd_dv_W9) | !is.na(data_wide$ypsdqtd_dv_CV4) | !is.na(data_wide$ypsdqtd_dv_CV6) | !is.na(data_wide$ypsdqtd_dv_CV8),]
+cat(paste("Number of participants also with at least one Total Difficulties score:", nrow(data_wide)))
+
+write_csv(data_wide, "Data/Cleaned/sample.csv")
+```
+
+```{r sample_characteristics_2, echo = FALSE}
+# Tabulating characteristics of inclusion groups
+data_tab <- data_wide %>% dplyr::select(
+  pidp,
+  ypschlth1,
+  ypschlth2,
+  sex_merged,
+  birthy,
+  ethn_dv,
+  fihhmnnet1_dv_W9,
+  mean_income,
+  contains("ypsdqtd_dv")
+)
+
+# Removing initial dataset
+rm(data_wide)
+
+data_tab %<>% mutate(
+  
+  # Grouping mean income into classes
+  mean_income_class = case_when(
+    mean_income < 20000/12 ~ "< 20000",
+    20000/12 <= mean_income & mean_income < 30000/12 ~ "20000-30000",
+    30000/12 <= mean_income & mean_income < 40000/12 ~ "30000-40000",
+    40000/12 <= mean_income & mean_income < 50000/12 ~ "40000-50000",
+    50000/12 <= mean_income ~ ">= 50000"
+  ),
+  
+  # Grouping ethnicity into classes
+  ethn_dv_class = case_when(
+    ethn_dv == 1 ~ "White British",
+    2 <= ethn_dv & ethn_dv <= 4 ~ "Other White",
+    5 <= ethn_dv & ethn_dv <= 8 ~ "Mixed",
+    9 <= ethn_dv & ethn_dv <= 13 ~ "Asian",
+    14 <= ethn_dv & ethn_dv <= 16 ~ "Black",
+    ethn_dv == 17 | ethn_dv == 97 ~ "Other"
+  ),
+  
+  # Creating a birth year variable to be made a factor variable
+  birthy_class = birthy
+)
+
+# Rendering characteristics as factor variables
+data_tab$sex_merged <- factor(data_tab$sex_merged)
+data_tab$birthy_class <- factor(data_tab$birthy_class)
+data_tab$ethn_dv_class <- factor(data_tab$ethn_dv_class)
+data_tab$mean_income_class <- factor(data_tab$mean_income_class)
+
+# Selecting relevant data
+data_tab %<>% dplyr::select(
+  ypschlth1,
+  ypschlth2,
+  sex_merged,
+  birthy_class,
+  ethn_dv_class,
+  mean_income_class,
+  contains("ypsdqtd_dv")
+)
+
+# Temporarily merging "Other" ethnicity group into NA
+data_temp <- data_tab %>% mutate(
+  ethn_dv_class = ifelse(ethn_dv_class == "Other", NA, ethn_dv_class)
+)
+
+# Re-rendering ethnicity as a factor variable
+data_temp$ethn_dv_class <- factor(data_temp$ethn_dv_class, labels = c("Asian", "Black", "Mixed", "Other White", "White British"))
+
+cat("All participants")
+nrow(data_temp)
+summary(data_temp %>% select(!contains("yp")), maxsum = Inf)
+
+# Temporarily merging "Other" ethnicity group into NA and income above £50,000 into NA
+data_temp <- data_tab %>% mutate(
+  ethn_dv_class = ifelse(ethn_dv_class == "Other", NA, ethn_dv_class),
+  mean_income_class = ifelse(mean_income_class == ">= 50000", NA, mean_income_class)
+)
+
+# Re-rendering ethnicity and income as factor variables
+data_temp$ethn_dv_class <- factor(data_temp$ethn_dv_class, labels = c("Asian", "Black", "Mixed", "Other White", "White British"))
+data_temp$mean_income_class <- factor(data_temp$mean_income_class, labels = c("< 20000", "20000-30000", "30000-40000", "40000-50000"))
+
+cat("Has W9 SDQ score")
+nrow(data_temp[!is.na(data_temp$ypsdqtd_dv_W9),])
+summary(data_temp[!is.na(data_temp$ypsdqtd_dv_W9),] %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Does not have W9 SDQ score")
+nrow(data_temp[is.na(data_temp$ypsdqtd_dv_W9),])
+summary(data_temp[is.na(data_temp$ypsdqtd_dv_W9),] %>% select(!contains("yp")), maxsum = Inf)
+
+# Temporarily merging "Other" ethnicity group into NA 
+data_temp <- data_tab %>% mutate(
+  ethn_dv_class = ifelse(ethn_dv_class == "Other", NA, ethn_dv_class)
+)
+
+# Re-rendering ethnicity as a factor variables
+data_temp$ethn_dv_class <- factor(data_temp$ethn_dv_class, labels = c("Asian", "Black", "Mixed", "Other White", "White British"))
+
+cat("Has CV4 SDQ score")
+nrow(data_temp[!is.na(data_temp$ypsdqtd_dv_CV4),])
+summary(data_temp[!is.na(data_temp$ypsdqtd_dv_CV4),] %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Does not have CV4 SDQ score")
+nrow(data_temp[is.na(data_temp$ypsdqtd_dv_CV4),])
+summary(data_temp[is.na(data_temp$ypsdqtd_dv_CV4),] %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Has CV6 SDQ score")
+nrow(data_temp[!is.na(data_temp$ypsdqtd_dv_CV6),])
+summary(data_temp[!is.na(data_temp$ypsdqtd_dv_CV6),] %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Does not have CV6 SDQ score")
+nrow(data_temp[is.na(data_temp$ypsdqtd_dv_CV6),])
+summary(data_temp[is.na(data_temp$ypsdqtd_dv_CV6),] %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Has CV8 SDQ score")
+nrow(data_temp[!is.na(data_temp$ypsdqtd_dv_CV8),])
+
+cat("Does not have CV8 SDQ score")
+nrow(data_temp[is.na(data_temp$ypsdqtd_dv_CV8),])
+
+data_tab %<>% mutate(
+  
+  # Re-grouping mean income
+  mean_income_class = case_when(
+    mean_income_class %in% c("< 20000", "20000-30000", "30000-40000") ~ "< 40000",
+    mean_income_class %in% c("40000-50000", ">= 50000") ~ ">= 40000"
+  ),
+  
+  # Re-grouping ethnicity
+  ethn_dv_class = case_when(
+    ethn_dv_class %in% c("White British", "Other White") ~ "White",
+    ethn_dv_class %in% c("Mixed", "Asian", "Black", "Other") ~ "Non-White"
+  ),
+  
+  # Grouping birth year
+  birthy_class = case_when(
+    birthy_class %in% c("2004", "2005", "2006", "2007") ~ "2004-07",
+    birthy_class %in% c("2008", "2009", "2010", "2011") ~ "2008-11"
+  )
+)
+
+# Re-rendering birth year, ethnicity and mean income as factor variables
+data_tab$birthy_class <- factor(data_tab$birthy_class)
+data_tab$ethn_dv_class <- factor(data_tab$ethn_dv_class)
+data_tab$mean_income_class <- factor(data_tab$mean_income_class)
+
+cat("All participants")
+nrow(data_tab)
+summary(data_tab %>% select(!contains("yp")), maxsum = Inf)
+
+cat("Participants with digital inclusion response")
+nrow(data_tab[!is.na(data_tab$ypschlth1),])
+summary(data_tab[!is.na(data_tab$ypschlth1),] %>% select(!ethn_dv_class & !contains("yp")), maxsum = Inf)
+
+cat("Participants without digital inclusion response")
+nrow(data_tab[is.na(data_tab$ypschlth1),])
+summary(data_tab[is.na(data_tab$ypschlth1),] %>% select(!ethn_dv_class & !contains("yp")), maxsum = Inf)
+
+# Excluding participants with no response to the digital inclusion question
+data_tab <- data_tab[!is.na(data_tab$ypschlth1),]
+
+cat("Computer = 1, Internet = 1")
+nrow(data_tab[data_tab$ypschlth1 == 1 & data_tab$ypschlth2 == 1,])
+summary(data_tab[data_tab$ypschlth1 == 1 & data_tab$ypschlth2 == 1,] %>% select(!ethn_dv_class & !contains("yp")), maxsum = Inf)
+
+cat("All other responses")
+nrow(data_tab[!(data_tab$ypschlth1 == 1 & data_tab$ypschlth2 == 1),])
+summary(data_tab[!(data_tab$ypschlth1 == 1 & data_tab$ypschlth2 == 1),] %>% select(!ethn_dv_class & !contains("yp")), maxsum = Inf)
+```

@@ -1,0 +1,1466 @@
+---
+title: "3b_analyse_controls"
+author: "Thomas E. Metherell"
+date: "16/09/2021"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+This script analyses the cleaned data from Understanding Society dataset for use in our study of digital exclusion and adolescent mental health during the COVID-19 pandemic in the United Kingdom.
+
+The focus of this analysis is fitting latent growth models to longitudinal SDQ data, divided by access to a computer and to a good internet connection and with covariates.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Dependencies
+We start by loading the necessary dependencies.
+
+```{r dependencies}
+library(tidyverse)
+library(magrittr)
+library(scales)
+library(lavaan)
+library(survey)
+library(lavaan.survey)
+library(visdat)
+```
+
+# Loading the data
+We can now load the cleaned dataset (long and wide versions), and select the waves and variables that are relevant to this analysis.
+
+```{r load_data}
+# Loading long dataset
+data_full <- read.csv("Data/Cleaned/data.csv", quote = "")
+
+# Loading wide dataset
+data_wide <- read.csv("Data/Cleaned/data_wide.csv", quote = "")
+
+# Selecting relevant variables and storing those in data_rel (long data)
+data_rel <- data_full[data_full$wave == "W9" | data_full$wave == "CV4" | data_full$wave == "CV6" | data_full$wave == "CV8",] %>% 
+  dplyr::select(
+    contains("ypsdqtd_dv"), # SDQ summary scores
+    wave, # Wave
+    pidp, # Participant ID 
+    ageon20200815, # Age on 15/08/2020
+    sex_merged, # Sex
+    birthy, # Birth year
+    ethn_dv, # Ethnicity
+    contains("ypschlth"), # Digital inclusion variables 
+    contains("betayth_lw") # Beta-version longitudinal weights
+  )
+
+# Selecting relevant variables and storing those in data_rel_wide (wide data)
+data_rel_wide <- data_wide %>% 
+  dplyr::select(
+    contains("ypsdqtd_dv"), # SDQ summary scores
+    pidp, # Participant ID
+    ageon20200815, # Age on 15/08/2020
+    sex_merged, # Sex 
+    birthy, # Birth year
+    ethn_dv, # Ethnicity
+    mean_income, # Mean household income
+    contains("ypschlth"), # Digital inclusion variables 
+    contains("betayth_lw"), # Beta-version longitudinal weights
+  )
+
+# Removing full datasets
+rm(data_full)
+rm(data_wide)
+```
+
+# Recoding variables
+We redefine wave, sex and digital inclusion variables as factors in the long data.
+
+```{r recode}
+data_rel$wave <- factor(data_rel$wave, levels = c("W9", "CV4", "CV6", "CV8"))
+
+data_rel$sex_merged <- factor(data_rel$sex_merged)
+levels(data_rel$sex_merged) <- c("Male", "Female")
+
+data_rel$ypschlth1 <- factor(data_rel$ypschlth1)
+levels(data_rel$ypschlth1) <- c("No", "Yes")
+data_rel$ypschlth2 <- factor(data_rel$ypschlth2)
+levels(data_rel$ypschlth2) <- c("No", "Yes")
+```
+
+# Creating dataset for latent growth models
+We specify the data frame `data_sdq`, which contains the data needed for fitting LGMs.
+
+```{r dataset}
+# Creating dataset for LGM fitting
+data_sdq <- data_rel_wide %>% 
+  dplyr::select(
+    pidp, # Participant ID
+    contains("ypsdqtd_dv"), # Total Difficulties score
+    sex_merged, # Sex
+    betayth_lw_CV8, # CV8 longitudinal weight 
+    ypschlth1, # Access to a computer
+    ypschlth2, # Access to a good internet connection
+    ethn_dv, # Ethnicity
+    birthy, # Birth year
+    mean_income # Mean household income
+  )
+
+# Excluding participants with no CV8 longitudinal weight
+data_sdq <- data_sdq[!is.na(data_sdq$betayth_lw_CV8),]
+
+# Renaming SDQ variables to the wave identifiers
+names(data_sdq) <- str_replace(names(data_sdq), "ypsdqtd_dv_", "")
+
+# Coding ethnicity as a dichotomous variable ("white or not")
+data_sdq %<>% mutate(
+  ethn_caucasian = if_else(ethn_dv == (1 | 2 | 3 | 4), 1, 0)
+)
+
+# Rescaling birth year between 0 and 1
+data_sdq$birthy <- rescale(data_sdq$birthy, to = c(0,1))
+
+# Reducing high outlier income to the next-highest value
+data_sdq[which.max(data_sdq$mean_income),]$mean_income <- data_sdq[which(data_sdq$mean_income == sort(data_sdq$mean_income, decreasing = TRUE)[2]),]$mean_income
+
+# Rescaling mean income between 0 and 1
+data_sdq$mean_income <- rescale(data_sdq$mean_income, to = c(0,1))
+
+# Specifying survey weights
+survey_design <- svydesign(~0, data = data_sdq, weights = data_sdq$betayth_lw_CV8)
+```
+
+# Visualising missing data
+
+```{r missing, echo = FALSE}
+vis_miss(data_sdq %>% dplyr::select(mean_income, sex_merged, birthy, ethn_caucasian, W9, CV4, CV6, CV8))
+```
+
+# Summarising SDQ scores by sociodemographic variables
+We illustrate the mean SDQ scores across waves according to certain sociodemographic variables.
+
+```{r control_summaries_plots, echo = FALSE, results = "asis"}
+# Creating index of waves
+wave_list<- factor(c("W9", "CV4", "CV6", "CV8"), levels = c("W9", "CV4", "CV6", "CV8"))
+
+# Creating summary of mean SDQ scores by sex
+wave <- rep(wave_list, 2)
+sex <- c(rep("Male", 4), rep("Female", 4))
+summary_data_sex <- data.frame(wave, sex)
+summary_data_sex$mean <- rep(NA, 8)
+summary_data_sex$sd <- rep(NA, 8)
+summary_data_sex$se <- rep(NA, 8)
+summary_data_sex$min <- rep(NA, 8)
+summary_data_sex$max <- rep(NA, 8)
+summary_data_sex$n <- rep(NA, 8)
+
+# Calculating means, standard deviations and total numbers of participants
+for(i in 1:4){
+  summary_data_sex$mean[i] <- mean(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Male"),]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_sex$sd[i] <- sd(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Male"),]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_sex$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Male"),]$ypsdqtd_dv))
+}
+
+for(i in 5:8){
+  summary_data_sex$mean[i] <- mean(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Female"),]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_sex$sd[i] <- sd(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Female"),]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_sex$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_sex$wave[i] & (data_rel$sex_merged == "Female"),]$ypsdqtd_dv))
+}
+
+# Calculating standard errors, minimum and maximum values
+summary_data_sex %<>% mutate(
+  se = sd/sqrt(n),
+  min = mean - se,
+  max = mean + se
+)
+
+cat("\n### Mean Total Difficulties scores by sex with standard error")
+ggplot(summary_data_sex, aes(x = wave, y = mean, group = sex, colour = sex)) +
+  annotate(geom = "rect", xmin = 11/6, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+  annotate(geom = "text", x = 4.45, y = 10, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+  geom_line() +
+  geom_ribbon(aes(y = NULL, ymin = min, ymax = max), alpha = 0.2) +
+  xlab(NULL) +
+  ylab("Total Difficulties score") +
+  scale_x_discrete(labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 15)) +
+  theme_classic()
+
+# Creating summary of mean SDQ scores by age
+wave <- rep(wave_list, 6)
+age <- c(rep(10, 4), rep(11, 4), rep(12, 4), rep(13, 4), rep(14, 4), rep(15, 4))
+summary_data_age <- data.frame(wave, age)
+summary_data_age$mean <- rep(NA, 24)
+summary_data_age$sd <- rep(NA, 24)
+summary_data_age$se <- rep(NA, 24)
+summary_data_age$min <- rep(NA, 24)
+summary_data_age$max <- rep(NA, 24)
+summary_data_age$n <- rep(NA, 24)
+
+# Calculating means, standard deviations and total numbers of participants
+for(j in 1:6){
+  for(i in 1:4){
+    summary_data_age$mean[(j-1) * 4 + i] <- mean(data_rel[data_rel$wave == summary_data_age$wave[(j-1) * 4 + i] & (data_rel$ageon20200815 == j + 9),]$ypsdqtd_dv, na.rm = TRUE)
+    summary_data_age$sd[(j-1) * 4 + i] <- sd(data_rel[data_rel$wave == summary_data_age$wave[(j-1) * 4 + i] & (data_rel$ageon20200815 == j + 9),]$ypsdqtd_dv, na.rm = TRUE)
+    summary_data_age$n[(j-1) * 4 + i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_age$wave[(j-1) * 4 + i] & (data_rel$ageon20200815 == j + 9),]$ypsdqtd_dv))
+  }
+}
+
+# Calculating standard errors, minimum and maximum values
+summary_data_age %<>% mutate(
+  se = sd/sqrt(n),
+  min = mean - se,
+  max = mean + se
+)
+
+# Defining age-11 values for W9 as NA (too small n)
+summary_data_age[summary_data_age$wave == "W9" & summary_data_age$age == 11, -which(names(summary_data_age) == "wave" | names(summary_data_age) == "age")] <- NA
+
+# Creating graph labels
+summary_data_age$label <- c(rep(NA, 3), 10, rep(NA, 3), 11, rep(NA, 3), 12, rep(NA, 3), 13, rep(NA, 3), 14, rep(NA, 3), 15)
+
+cat("\n### Mean Total Difficulties scores by age with standard error")
+ggplot(summary_data_age, aes(x = wave, y = mean, group = age, colour = age)) +
+  annotate(geom = "rect", xmin = 11/6, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+  annotate(geom = "text", x = 4.45, y = 9.4, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+  geom_line(na.rm = TRUE) +
+  geom_ribbon(aes(y = NULL, ymin = min, ymax = max, colour = NULL), alpha = 0.05, na.rm = TRUE) +
+  xlab(NULL) +
+  ylab("Total Difficulties score") +
+  labs(colour = "Age on 15/08/2020") +
+  geom_label(label = summary_data_age$label, na.rm = TRUE) +
+  scale_x_discrete(labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 15)) +
+  theme_classic()
+
+# Dichotomising ethnicity in long dataset
+data_rel %<>% mutate(ethn_caucasian = if_else(ethn_dv == (1 | 2 | 3 | 4), "White", "Non-White"))
+
+# Creating summary of mean SDQ scores by dichotomised ethnicity
+wave <- rep(wave_list, 2)
+ethn_caucasian <- c(rep("White", 4), rep("Non-White", 4))
+summary_data_ethn <- data.frame(wave, ethn_caucasian)
+summary_data_ethn$mean <- rep(NA, 8)
+summary_data_ethn$sd <- rep(NA, 8)
+summary_data_ethn$se <- rep(NA, 8)
+summary_data_ethn$min <- rep(NA, 8)
+summary_data_ethn$max <- rep(NA, 8)
+summary_data_ethn$n <- rep(NA, 8)
+
+# Calculating means, standard deviations and total numbers of participants
+for(i in 1:4){
+  summary_data_ethn$mean[i] <- mean(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "White",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_ethn$sd[i] <- sd(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "White",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_ethn$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "White",]$ypsdqtd_dv))
+}
+
+for(i in 5:8){
+  summary_data_ethn$mean[i] <- mean(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "Non-White",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_ethn$sd[i] <- sd(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "Non-White",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_ethn$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_ethn$wave[i] & data_rel$ethn_caucasian == "Non-White",]$ypsdqtd_dv))
+}
+
+# Calculating standard errors, minimum and maximum values
+summary_data_ethn %<>% mutate(
+  se = sd/sqrt(n),
+  min = mean - se,
+  max = mean + se
+)
+
+cat("\n### Mean Total Difficulties scores by dichotomised ethnicity with standard error")
+ggplot(summary_data_ethn, aes(x = wave, y = mean, group = ethn_caucasian, colour = ethn_caucasian)) +
+  annotate(geom = "rect", xmin = 11/6, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+  annotate(geom = "text", x = 4.45, y = 9.2, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+  geom_line() +
+  geom_ribbon(aes(y = NULL, ymin = min, ymax = max), alpha = 0.2) +
+  xlab(NULL) +
+  ylab("Total Difficulties score") +
+  labs(colour = "Ethnicity") +
+  scale_x_discrete(labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 15)) +
+  theme_classic()
+
+# Creating summary of mean SDQ scores by computer access
+wave <- rep(wave_list, 2)
+ypschlth1 <- c(rep("No", 4), rep("Yes", 4))
+summary_data_comp <- data.frame(wave, ypschlth1)
+summary_data_comp$mean <- rep(NA, 8)
+summary_data_comp$sd <- rep(NA, 8)
+summary_data_comp$se <- rep(NA, 8)
+summary_data_comp$min <- rep(NA, 8)
+summary_data_comp$max <- rep(NA, 8)
+summary_data_comp$n <- rep(NA, 8)
+
+# Calculating means, standard deviations and total numbers of participants
+for(i in 1:4){
+  summary_data_comp$mean[i] <- mean(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "No",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_comp$sd[i] <- sd(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "No",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_comp$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "No",]$ypsdqtd_dv))
+}
+
+for(i in 5:8){
+  summary_data_comp$mean[i] <- mean(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "Yes",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_comp$sd[i] <- sd(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "Yes",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_comp$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_comp$wave[i] & data_rel$ypschlth1 == "Yes",]$ypsdqtd_dv))
+}
+
+# Calculating standard errors, minimum and maximum values
+summary_data_comp %<>% mutate(
+  se = sd/sqrt(n),
+  min = mean - se,
+  max = mean + se
+)
+
+cat("\n### Mean Total Difficulties scores by computer access with standard error")
+ggplot(summary_data_comp, aes(x = wave, y = mean, group = ypschlth1, colour = ypschlth1)) +
+  annotate(geom = "rect", xmin = 11/6, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+  annotate(geom = "text", x = 4.45, y = 9.5, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+  geom_line() +
+  geom_ribbon(aes(y = NULL, ymin = min, ymax = max), alpha = 0.2) +
+  xlab(NULL) +
+  ylab("Total Difficulties score") +
+  labs(colour = "Has access to a computer") +
+  scale_x_discrete(labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 15)) +
+  theme_classic()
+
+write.csv(summary_data_comp, "Data/Objects/summary_data_comp.csv")
+
+# Creating summary of mean SDQ scores by internet access
+ypschlth2 <- c(rep("No", 4), rep("Yes", 4))
+summary_data_int <- data.frame(wave, ypschlth2)
+summary_data_int$mean <- rep(NA, 8)
+summary_data_int$sd <- rep(NA, 8)
+summary_data_int$se <- rep(NA, 8)
+summary_data_int$min <- rep(NA, 8)
+summary_data_int$max <- rep(NA, 8)
+summary_data_int$n <- rep(NA, 8)
+
+# Calculating means, standard deviations and total numbers of participants
+for(i in 1:4){
+  summary_data_int$mean[i] <- mean(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "No",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_int$sd[i] <- sd(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "No",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_int$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "No",]$ypsdqtd_dv))
+}
+
+for(i in 5:8){
+  summary_data_int$mean[i] <- mean(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "Yes",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_int$sd[i] <- sd(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "Yes",]$ypsdqtd_dv, na.rm = TRUE)
+  summary_data_int$n[i] <- sum(!is.na(data_rel[data_rel$wave == summary_data_int$wave[i] & data_rel$ypschlth2 == "Yes",]$ypsdqtd_dv))
+}
+
+# Calculating standard errors, minimum and maximum values
+summary_data_int %<>% mutate(
+  se = sd/sqrt(n),
+  min = mean - se,
+  max = mean + se
+)
+
+cat("\n### Mean Total Difficulties scores by internet access with standard error")
+ggplot(summary_data_int, aes(x = wave, y = mean, group = ypschlth2, colour = ypschlth2)) +
+  annotate(geom = "rect", xmin = 11/6, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+  annotate(geom = "text", x = 4.45, y = 9.5, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+  geom_line() +
+  geom_ribbon(aes(y = NULL, ymin = min, ymax = max), alpha = 0.2) +
+  xlab(NULL) +
+  ylab("Total Difficulties score") +
+  labs(colour = str_wrap("Has access to a good internet connection", width = 20)) +
+  scale_x_discrete(labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 15)) +
+  theme_classic()
+```
+
+# Fitting models grouped by computer access with covariates
+We now fit a new LGM with the participants grouped by whether or not they have access to a computer, and controlling for sex, birth year, ethnicity and mean household income.
+
+``` {r computer_covariates}
+# Fitting no-change model
+model_comp_nc <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_nc <- growth(model_comp_nc, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Fitting linear model
+model_comp_lin <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_lin <- growth(model_comp_lin, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing linear to no-change model
+anova(fit_comp_lin, fit_comp_nc)
+
+# Accepting linear over no-change model
+
+# Fitting quadratic model
+model_comp_quad <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_quad <- growth(model_comp_quad, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing quadratic to linear model
+anova(fit_comp_quad, fit_comp_lin)
+
+# Accepting quadratic over linear model
+
+# Fitting model with error variances constrained to equality
+model_comp_con_ervar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ervar <- growth(model_comp_con_ervar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained error variances to free model
+anova(fit_comp_con_ervar, fit_comp_quad)
+
+# Accepting model with constrained error variances over model without
+
+# Fitting model with constrained y-intercept
+model_comp_con_ervar_i <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ervar_i <- growth(model_comp_con_ervar_i, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept to free model
+anova(fit_comp_con_ervar_i, fit_comp_con_ervar)
+
+# Accepting model with constrained y-intercept over free model
+
+# Fitting model with constrained linear coefficient
+model_comp_con_ervar_i_s <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ervar_i_s <- growth(model_comp_con_ervar_i_s, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient to model without
+anova(fit_comp_con_ervar_i_s, fit_comp_con_ervar_i)
+
+# Rejecting model with constrained linear coefficient
+
+# Fitting model with constrained quadratic coefficient
+model_comp_con_ervar_i_q <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+ 
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+
+i ~ c(i_1, i_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ervar_i_q <- growth(model_comp_con_ervar_i_q, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained quadratic coefficient to model without
+anova(fit_comp_con_ervar_i_q, fit_comp_con_ervar_i)
+
+# Rejecting model with constrained quadratic coefficient
+fit_comp_prov <- fit_comp_con_ervar_i
+
+# Fitting model with constrained y-intercept variance
+model_comp_con_ivar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~~ c(ivar, ivar) * i
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ivar <- growth(model_comp_con_ivar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept variance to model without
+anova(fit_comp_con_ivar, fit_comp_prov)
+
+# Accepting model with constrained y-intercept variance over model without
+
+# Fitting model with constrained linear coefficient variance
+model_comp_con_ivar_svar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ivar_svar <- growth(model_comp_con_ivar_svar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient variance to model without
+anova(fit_comp_con_ivar_svar, fit_comp_con_ivar)
+
+# Accepting model with constrained linear coefficient variance over model without
+
+# Fitting model with constrained quadratic coefficient variance
+model_comp_con_ivar_svar_qvar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_ivar_svar_qvar <- growth(model_comp_con_ivar_svar_qvar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained quadratic coefficient variance to model without
+anova(fit_comp_con_ivar_svar_qvar, fit_comp_con_ivar_svar)
+
+# Accepting model with constrained quadratic coefficient variance over model without
+fit_comp_prov <- fit_comp_con_ivar_svar_qvar
+
+# Fitting model with constrained y-intercept/linear coefficient covariance
+model_comp_con_iscovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_iscovar <- growth(model_comp_con_iscovar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept/linear coefficient covariance to model without
+anova(fit_comp_con_iscovar, fit_comp_prov)
+
+# Accepting model with constrained y-intercept/linear coefficient covariance over model without
+
+# Fitting model with constrained y-intercept/quadratic coefficient covariance
+model_comp_con_iscovar_iqcovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+i ~~ c(iqcovar, iqcovar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_iscovar_iqcovar <- growth(model_comp_con_iscovar_iqcovar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept/quadratic coefficient covariance to model without
+anova(fit_comp_con_iscovar_iqcovar, fit_comp_con_iscovar)
+
+# Accepting model with constrained y-intercept/quadratic coefficient covariance over model without
+
+# Fitting model with constrained linear coefficient/quadratic coefficient covariance
+model_comp_con_iscovar_iqcovar_sqcovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+i ~~ c(iqcovar, iqcovar) * q
+s ~~ c(sqcovar, sqcovar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_comp_con_iscovar_iqcovar_sqcovar <- growth(model_comp_con_iscovar_iqcovar_sqcovar, data = data_sdq[!is.na(data_sdq$ypschlth1),], group = "ypschlth1", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient/quadratic coefficient covariance to model without
+anova(fit_comp_con_iscovar_iqcovar_sqcovar, fit_comp_con_iscovar_iqcovar, method = "satorra.bentler.2010")
+
+# Accepting model with constrained linear coefficient/quadratic coefficient covariance over model without
+fit_comp <- fit_comp_con_iscovar_iqcovar_sqcovar
+
+# Summary of unweighted model
+summary(fit_comp)
+
+# Saving model fit object
+saveRDS(fit_comp, file = "Data/Objects/comp_cov.rds")
+
+# Preparing unweighted LGM functions for plotting
+pT <- parTable(fit_comp)
+pT %<>% mutate(maxv = est + se, minv = est - se)
+fit_comp_fn0 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 2,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 2,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 2,]$est*x^2
+fit_comp_fn1 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 1,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 1,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 1,]$est*x^2
+
+# Using LGM parameters to predict individual trajectories
+indiv_traj_p <- predict(fit_comp)
+
+# Saving predicted trajectories object
+saveRDS(indiv_traj_p, file = "Data/Objects/comp_predict.rds")
+
+# Extracting predicted individual trajectory data
+indiv_traj0 <- data.frame(indiv_traj_p[["0"]])
+indiv_traj1 <- data.frame(indiv_traj_p[["1"]])
+i <- nrow(indiv_traj0)
+j <- nrow(indiv_traj1)
+
+# Using predicted individual trajectories to indicate the clinical significance of the results. The maximum modelled Total Difficulties score is identified for each participant and this maximum value compared against the standard SDQ clinical cutoffs (the ranges have been adjusted to fit a continuous scale)
+
+indiv_traj0 <- indiv_traj0 %>% rowwise() %>% mutate(max_value = case_when(
+  0 <= -s/(2*q) & -s/(2*q) <= 3 ~ max(i, i - s^2/(4*q), i + 3*s + 9*q),
+  -s/(2*q) < 0 | -s/(2*q) > 3 ~ max(i, i + 3*s + 9*q)
+))
+cat(paste("Total number without computer access =", nrow(indiv_traj0), "\n\n"))
+cat(paste("Number of individuals predicted to have at worst slightly raised Total Difficulties (no computer access) =", nrow(indiv_traj0[indiv_traj0$max_value >= 14.5 & indiv_traj0$max_value < 17.5,]), "\n\n"))
+cat(paste("Number of individuals predicted to have at worst high Total Difficulties (no computer access) =", nrow(indiv_traj0[indiv_traj0$max_value >= 17.5 & indiv_traj0$max_value < 19.5,]), "\n\n"))
+cat(paste("Number of individuals predicted to have at worst very high Total Difficulties (no computer access) =", nrow(indiv_traj0[indiv_traj0$max_value >= 19.5,]), "\n\n"))
+
+indiv_traj1 <- indiv_traj1 %>% rowwise() %>% mutate(max_value = case_when(
+  0 <= -s/(2*q) & -s/(2*q) <= 3 ~ max(i, i - s^2/(4*q), i + 3*s + 9*q),
+  -s/(2*q) < 0 | -s/(2*q) > 3 ~ max(i, i + 3*s + 9*q)
+))
+cat(paste("Total number with computer access =", nrow(indiv_traj1)))
+cat(paste("Number of individuals predicted to have at worst slightly raised Total Difficulties (with computer access) =", nrow(indiv_traj1[indiv_traj1$max_value >= 14.5 & indiv_traj1$max_value < 17.5,]), "\n\n"))
+cat(paste("Number of individuals predicted to have at worst high Total Difficulties (with computer access) =", nrow(indiv_traj1[indiv_traj1$max_value >= 17.5 & indiv_traj1$max_value < 19.5,]), "\n\n"))
+cat(paste("Number of individuals predicted to have at worst very high Total Difficulties (with computer access) =", nrow(indiv_traj1[indiv_traj1$max_value >= 19.5,]), "\n\n"))
+```
+
+### Final LGM (unweighted)
+
+```{r computer_covariates_plot_1, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 9, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    geom_function(mapping = aes(colour = "No"), fun = fit_comp_fn0, xlim = c(0, 3), size = 1) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_comp_fn1, xlim = c(0, 3), size = 1) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    ylim(9, 19) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D", "Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+### Final LGM (unweighted, by group with predicted individual trajectories)
+
+```{r computer_covariates_plot_2, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:i, function(i) geom_function(fun = function(x) indiv_traj0$i[i] + indiv_traj0$s[i] * x + indiv_traj0$q[i] * x^2, mapping = aes(colour = "No"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj0))) +
+    geom_function(mapping = aes(colour = "No"), fun = fit_comp_fn0, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D")) +
+    theme_classic()
+)
+
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:j, function(j) geom_function(fun = function(x) indiv_traj1$i[j] + indiv_traj1$s[j] * x + indiv_traj1$q[j] * x^2, mapping = aes(colour = "Yes"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj1))) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_comp_fn1, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+```{r computer_weighting}
+# Applying weights to model
+fit_comp_weighted <- lavaan.survey(fit_comp_con_iscovar_iqcovar_sqcovar, survey_design, estimator = "ML")
+
+# Summary of weighted model
+summary(fit_comp_weighted)
+
+# Preparing LGM functions for plotting
+pT <- parTable(fit_comp_weighted)
+pT %<>% mutate(maxv = est + se, minv = est - se)
+fit_comp_fn0 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 2,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 2,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 2,]$est*x^2
+fit_comp_fn1 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 1,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 1,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 1,]$est*x^2
+```
+
+### Final LGM (weighted, not reliable)
+
+```{r computer_weighting_plot_1, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 7, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    geom_function(mapping = aes(colour = "No"), fun = fit_comp_fn0, xlim = c(0, 3), size = 1) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_comp_fn1, xlim = c(0, 3), size = 1) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D", "Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+### Final LGM (weighted, not reliable, by group with predicted individual trajectories)
+
+```{r computer_weighting_plot_2, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = -2, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:i, function(i) geom_function(fun = function(x) indiv_traj0$i[i] + indiv_traj0$s[i] * x + indiv_traj0$q[i] * x^2, mapping = aes(colour = "No"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj0))) +
+    geom_function(mapping = aes(colour = "No"), fun = fit_comp_fn0, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    ylim(-2, 32) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D")) +
+    theme_classic()
+)
+
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:j, function(j) geom_function(fun = function(x) indiv_traj1$i[j] + indiv_traj1$s[j] * x + indiv_traj1$q[j] * x^2, mapping = aes(colour = "Yes"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj1))) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_comp_fn1, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = "Has access to a computer", fill = NULL) +
+    scale_colour_manual(values = c("Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+# Fitting models grouped by internet access with covariates
+We now fit a new LGM with the participants grouped by whether or not they have access to a "good internet connection", and controlling for sex, birth year, ethnicity and mean household income.
+
+```{r internet_covariates}
+# Fitting no-change model
+model_int_nc <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_nc <- growth(model_int_nc, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Fitting linear model
+model_int_lin <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_lin <- growth(model_int_lin, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing linear to no-change model
+anova(fit_int_lin, fit_int_nc)
+
+# Accepting linear over no-change model
+
+# Fitting quadratic model
+model_int_quad <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_quad <- growth(model_int_quad, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing quadratic to linear model
+anova(fit_int_quad, fit_int_lin)
+
+# Accepting quadratic over linear model
+
+# Fitting model with error variances constrained to equality
+model_int_con_ervar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_ervar <- growth(model_int_con_ervar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained error variances to free model
+anova(fit_int_con_ervar, fit_int_quad)
+
+# Accepting model with constrained error variances over free model
+
+# Fitting model with constrained y-intercept
+model_int_con_i <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_i <- growth(model_int_con_i, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept to model without
+anova(fit_int_con_i, fit_int_con_ervar)
+
+# Accepting model with constrained y-intercept over model without
+
+# Fitting model with constrained linear coefficient
+model_int_con_i_s <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_i_s <- growth(model_int_con_i_s, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient to model without
+anova(fit_int_con_i_s, fit_int_con_i)
+
+# Accepting model with constrained linear coefficient over model without
+
+# Fitting model with constrained quadratic coefficient
+model_int_con_i_s_q <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_i_s_q <- growth(model_int_con_i_s_q, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained quadratic coefficient to model without
+anova(fit_int_con_i_s_q, fit_int_con_i_s)
+
+# Accepting model with constrained quadratic coefficient over model without
+fit_int_prov <- fit_int_con_i_s_q
+
+# Fitting model with constrained y-intercept variance
+model_int_con_ivar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_ivar <- growth(model_int_con_ivar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept variance to model without
+anova(fit_int_con_ivar, fit_int_prov)
+
+# Accepting model with constrained y-intercept variance over model without
+
+# Fitting model with constrained linear coefficient variance
+model_int_con_ivar_svar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_ivar_svar <- growth(model_int_con_ivar_svar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient variance to model without
+anova(fit_int_con_ivar_svar, fit_int_con_ivar)
+
+# Accepting model with constrained linear coefficient variance over model without
+
+# Fitting model with constrained quadratic coefficient variance
+model_int_con_ivar_svar_qvar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_ivar_svar_qvar <- growth(model_int_con_ivar_svar_qvar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained quadratic coefficient variance to model without
+anova(fit_int_con_ivar_svar_qvar, fit_int_con_ivar_svar)
+
+# Accepting model with constrained quadratic coefficient variance over model without
+fit_int_prov <- fit_int_con_ivar_svar_qvar
+
+# Fitting model with constrained y-intercept/linear coefficient covariance
+model_int_con_iscovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_iscovar <- growth(model_int_con_iscovar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept/linear coefficient covariance to model without
+anova(fit_int_con_iscovar, fit_int_prov)
+
+# Accepting model with constrained y-intercept/linear coefficient covariance over model without
+
+# Fitting model with constrained y-intercept/quadratic coefficient covariance
+model_int_con_iscovar_iqcovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+ 
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+i ~~ c(iqcovar, iqcovar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_iscovar_iqcovar <- growth(model_int_con_iscovar_iqcovar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained y-intercept/quadratic coefficient covariance to model without
+anova(fit_int_con_iscovar_iqcovar, fit_int_con_iscovar)
+
+# Rejecting model with constrained y-intercept/quadratic coefficient covariance
+
+# Fitting model with constrained linear coefficient/quadratic coefficient covariance
+model_int_con_iscovar_sqcovar <- '
+sex_merged ~ 1; sex_merged ~~ sex_merged
+birthy ~ 1; birthy ~~ birthy
+ethn_caucasian ~ 1; ethn_caucasian ~~ ethn_caucasian
+mean_income ~ 1; mean_income ~~ mean_income
+
+i =~ 1*W9 + 1*CV4 + 1*CV6 + 1*CV8
+s =~ 0*W9 + 1*CV4 + 2*CV6 + 3*CV8
+q =~ 0*W9 + 1*CV4 + 4*CV6 + 9*CV8
+
+W9 ~~ c(ervar1, ervar1) * W9
+CV4 ~~ c(ervar2, ervar2) * CV4
+CV6 ~~ c(ervar3, ervar3) * CV6
+CV8 ~~ c(ervar4, ervar4) * CV8
+
+i ~ c(i_1, i_1) * 1
+s ~ c(s_1, s_1) * 1
+q ~ c(q_1, q_1) * 1
+
+i ~~ c(ivar, ivar) * i
+s ~~ c(svar, svar) * s
+q ~~ c(qvar, qvar) * q
+
+i ~~ c(iscovar, iscovar) * s
+s ~~ c(sqcovar, sqcovar) * q
+
+i ~ sex_merged + birthy + ethn_caucasian + mean_income
+s ~ sex_merged + birthy + ethn_caucasian + mean_income
+q ~ sex_merged + birthy + ethn_caucasian + mean_income
+'
+
+fit_int_con_iscovar_sqcovar <- growth(model_int_con_iscovar_sqcovar, data = data_sdq[!is.na(data_sdq$ypschlth2),], group = "ypschlth2", missing = "fiml", estimator = "mlr")
+
+# Comparing model with constrained linear coefficient/quadratic coefficient covariance to model without
+anova(fit_int_con_iscovar_sqcovar, fit_int_con_iscovar)
+
+# Accepting model with constrained linear coefficient/quadratic coefficient covariance over model without
+fit_int <- fit_int_con_iscovar_sqcovar
+
+# Summary of unweighted model
+summary(fit_int)
+
+# Saving model fit object
+saveRDS(fit_int, file = "Data/Objects/int_cov.rds")
+
+# Preparing LGM functions for plotting
+pT <- parTable(fit_int)
+fit_int_fn0 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 2,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 2,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 2,]$est*x^2
+fit_int_fn1 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 1,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 1,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 1,]$est*x^2
+
+# Using LGM parameters to predict individual trajectories
+indiv_traj_p <- predict(fit_int)
+
+# Saving predicted trajectories object
+saveRDS(indiv_traj_p, file = "Data/Objects/int_predict.rds")
+
+# Extracting predicted individual trajectory data
+indiv_traj0 <- data.frame(indiv_traj_p[["0"]])
+indiv_traj1 <- data.frame(indiv_traj_p[["1"]])
+i <- nrow(indiv_traj0)
+j <- nrow(indiv_traj1)
+```
+
+### Final LGM (unweighted)
+
+```{r internet_covariates_plot_1, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 9, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    geom_function(mapping = aes(colour = "No"), fun = fit_int_fn0, xlim = c(0, 3), size = 1) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_int_fn1, xlim = c(0, 3), size = 1) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    ylim(9, 19) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20)) +
+    scale_colour_manual(values = c("No" = "#F8766D", "Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+### Final LGM (unweighted, by group with individual trajectories)
+
+```{r internet_covariates_plot_2, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:i, function(i) geom_function(fun = function(x) indiv_traj0$i[i] + indiv_traj0$s[i] * x + indiv_traj0$q[i] * x^2, mapping = aes(colour = "No"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj0))) +
+    geom_function(mapping = aes(colour = "No"), fun = fit_int_fn0, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20), fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D")) +
+    theme_classic()
+)
+
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:j, function(j) geom_function(fun = function(x) indiv_traj1$i[j] + indiv_traj1$s[j] * x + indiv_traj1$q[j] * x^2, mapping = aes(colour = "Yes"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj1))) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_int_fn1, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20), fill = NULL) +
+    scale_colour_manual(values = c("Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+```{r internet_weighting}
+# Applying weights to model
+fit_int_weighted <- lavaan.survey(fit_int_con_iscovar_sqcovar, survey_design, estimator = "ML")
+
+# Summary of weighted model
+summary(fit_int_weighted)
+
+# Preparing LGM functions for plotting
+pT <- parTable(fit_int_weighted)
+fit_int_fn0 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 2,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 2,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 2,]$est*x^2
+fit_int_fn1 <- function(x) pT[pT$lhs == "i" & pT$op == "~1" & pT$group == 1,]$est + pT[pT$lhs == "s" & pT$op == "~1" & pT$group == 1,]$est*x + pT[pT$lhs == "q" & pT$op == "~1" & pT$group == 1,]$est*x^2
+```
+
+### Final LGM (weighted)
+
+```{r internet_weighting_plot_1, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 11, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    geom_function(mapping = aes(colour = "No"), fun = fit_int_fn0, xlim = c(0, 3), size = 1) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_int_fn1, xlim = c(0, 3), size = 1) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20)) +
+    scale_colour_manual(values = c("No" = "#F8766D", "Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
+
+### Final LGM (weighted, by group with predicted individual trajectories)
+
+```{r internet_weighting_plot_2, echo = FALSE}
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = -2, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:i, function(i) geom_function(fun = function(x) indiv_traj0$i[i] + indiv_traj0$s[i] * x + indiv_traj0$q[i] * x^2, mapping = aes(colour = "No"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj0))) +
+    geom_function(mapping = aes(colour = "No"), fun = fit_int_fn0, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    ylim(-2, 32) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20), fill = NULL) +
+    scale_colour_manual(values = c("No" = "#F8766D")) +
+    theme_classic()
+)
+
+suppressMessages(
+  ggplot() +
+    annotate(geom = "rect", xmin = 5/6, xmax = 3.5, ymin = -Inf, ymax = Inf, fill = "grey", alpha = 0.3) +
+    annotate(geom = "text", x = 3.45, y = 0, label = "COVID-19 pandemic", hjust = "right", vjust = "top") +
+    lapply(1:j, function(j) geom_function(fun = function(x) indiv_traj1$i[j] + indiv_traj1$s[j] * x + indiv_traj1$q[j] * x^2, mapping = aes(colour = "Yes"), xlim = c(0, 3), size = 0.5, alpha = 20/nrow(indiv_traj1))) +
+    geom_function(mapping = aes(colour = "Yes"), fun = fit_int_fn1, xlim = c(0, 3), size = 2) +
+    scale_x_continuous(limits = c(0, 3.5), breaks = 0:3, labels = str_wrap(c("2017-19", "July 2020", "November 2020", "March 2021"), width = 10)) +
+    xlab(NULL) +
+    ylab("Total Difficulties score") +
+    labs(colour = str_wrap("Has access to a good internet connection", width = 20), fill = NULL) +
+    scale_colour_manual(values = c("Yes" = "#00BFC4")) +
+    theme_classic()
+)
+```
