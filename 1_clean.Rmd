@@ -1,0 +1,262 @@
+---
+title: "1_clean"
+author: "Thomas E. Metherell"
+date: "16/08/2021"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+This script cleans data from the Understanding Society dataset for use in our study of digital exclusion and adolescent mental health during the COVID-19 pandemic in the United Kingdom.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Dependencies
+We start by loading the necessary dependencies.
+
+```{r dependencies, warning=FALSE}
+# Loading dependencies
+library(tidyverse)
+library(magrittr)
+library(scales)
+```
+
+# Loading the data
+We can now load the data downloaded from the UK Data Service in accordance with the datasets specified in the analysis plan. Here we are using the tab-delimited format; SPSS and Stata equivalents are also available.
+
+```{r load_data}
+# Loading youth and individual response datasets from UKHLS waves 9 and 10
+W9_raw <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_w9/i_indresp.tab", quote = "")
+W9Y_raw <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_w9/i_youth.tab", quote = "")
+W10_raw <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_w10/j_indresp.tab", quote = "")
+W10Y_raw <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_w10/j_youth.tab", quote = "")
+
+# Loading UKHLS wave 9 household survey dataset
+W9hh_raw <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_w9/i_hhresp.tab", quote= "")
+
+# Loading all COVID-19 individual response web survey datasets
+for(i in 1:8){
+  assign(paste0("CV", i, "w_raw"), read.delim(paste0("Data/Raw/COVID-19/UKDA-8644-tab/tab/c", letters[i], "_indresp_w.tab"), quote = ""))
+}
+
+# Loading COVID-19 individual response telephone survey dataset from waves 2 and 6
+  CV2t_raw <- read.delim("Data/Raw/COVID-19/UKDA-8644-tab/tab/cb_indresp_t.tab", quote = "")
+  CV6t_raw <- read.delim("Data/Raw/COVID-19/UKDA-8644-tab/tab/cf_indresp_t.tab", quote = "")
+
+# Loading COVID-19 youth datasets from waves 4, 6 and 8
+for(i in c(4, 6, 8)){
+  assign(paste0("CV", i, "Y_raw"), read.delim(paste0("Data/Raw/COVID-19/UKDA-8644-tab/tab/c", letters[i], "_youth_p.tab"), quote = ""))
+}
+```
+
+# Cleaning the data
+We specify a function, `clean_data`, to define negative numbers in the datasets as NAs and select the variables of interest as outlined in the pre-registration documentation.
+
+```{r clean_data}
+#######
+# Function: clean_data
+# Input: a raw data frame
+# Method: the function defines any negative numbers as NAs and selects variables of interest in the current study
+# Output: a cleaned data frame
+#######
+
+clean_data <- function(dataset){
+  is.na(dataset[,]) <- dataset[,] < 0
+  
+  dataset %<>%
+    dplyr::select(
+      contains("pidp"), # Participant ID
+      contains("hidp"), # Household ID
+      contains("ageon20200815"), # Participant age
+      contains("chsex"), # Sex
+      contains("ypsdqtd_dv"), # SDQ Total Difficulties scores
+      contains("ypschlth"), # Digital inclusion variables
+      contains("fihhmnnet1_dv"),
+      contains("hhincome_amount") & !contains("ghhincome"),
+      contains("hhincome_period") & !contains("ghhincome"), # Household income
+      contains("betayth_lw") # Calculated longitudinal weights
+    )
+  return(dataset)
+}
+
+# Applying function to all datasets
+W9_clean <- clean_data(W9_raw)
+W9Y_clean <- clean_data(W9Y_raw)
+W9hh_clean <- clean_data(W9hh_raw)
+W10_clean <- clean_data(W10_raw)
+W10Y_clean <- clean_data(W10Y_raw)
+for(i in 1:8){
+  assign(paste0("CV", i, "w_clean"), clean_data(get(paste0("CV", i, "w_raw"))))
+}
+CV2t_clean <- clean_data(CV2t_raw)
+CV6t_clean <- clean_data(CV6t_raw)
+for(i in c(4, 6, 8)){
+  assign(paste0("CV", i, "Y_clean"), clean_data(get(paste0("CV", i, "Y_raw"))))
+}
+
+W9hh_clean %<>% dplyr::select(i_hidp, i_fihhmnnet1_dv)
+
+# Removing raw data
+rm(list = c("W9_raw", "W9Y_raw", "W9hh_raw", "W10_raw", "W10Y_raw", "CV1w_raw", "CV2w_raw", "CV2t_raw", "CV3w_raw", "CV4w_raw", "CV4Y_raw", "CV5w_raw", "CV6w_raw", "CV6t_raw", "CV6Y_raw", "CV7w_raw", "CV8w_raw", "CV8Y_raw"))
+```
+
+# Tidying the data
+For ease of use, we convert the data into "tidy" format (where each row represents one observation) and merge the waves into a single data frame. For the COVID-19 survey this is done via the specified function `tidy_COVID`.
+
+```{r tidy}
+#######
+# Function: tidy_COVID
+# Inputs: a cleaned COVID-19 survey dataset and the COVID-19 survey wave number to which the dataset corresponds
+# Method: the function removes the wave-demarcating prefix (e.g. "ca_") from variable names and adds a new variable "wave" which encodes this information instead
+# Output: a tidied version of the dataset
+#######
+
+tidy_COVID <- function(dataset, wave_num){
+  names(dataset) <- str_replace(names(dataset), paste0("c", letters[wave_num], "_"), "")
+  dataset$wave <- rep(paste0("CV", wave_num), nrow(dataset))
+  return(dataset)
+}
+
+# Applying function/equivalent code to all datasets except W9 household data
+names(W9_clean) <- str_replace(names(W9_clean), "i_", "") # Removing wave indicator
+W9_clean$wave <- rep("W9", nrow(W9_clean)) # Making index of waves
+names(W9Y_clean) <- str_replace(names(W9Y_clean), "i_", "")
+W9Y_clean$wave <- rep("W9", nrow(W9Y_clean))
+names(W10_clean) <- str_replace(names(W10_clean), "j_", "")
+W10_clean$wave <- rep("W10", nrow(W10_clean))
+names(W10Y_clean) <- str_replace(names(W10Y_clean), "j_", "")
+W10Y_clean$wave <- rep("W10", nrow(W10Y_clean))
+for(i in 1:8){
+  assign(paste0("CV", i, "w_clean"), tidy_COVID(get(paste0("CV", i, "w_clean")), i))
+}
+CV2t_clean <- tidy_COVID(CV2t_clean, 2)
+CV6t_clean <- tidy_COVID(CV6t_clean, 6)
+for(i in c(4, 6, 8)){
+  assign(paste0("CV", i, "Y_clean"), tidy_COVID(get(paste0("CV", i, "Y_clean")), i))
+}
+
+# Binding data into one dataset
+data_prov <- dplyr::bind_rows(W9_clean, W9Y_clean, W10_clean, W10Y_clean, CV1w_clean, CV2w_clean, CV2t_clean, CV3w_clean, CV4w_clean, CV4Y_clean, CV5w_clean, CV6w_clean, CV6t_clean, CV6Y_clean, CV7w_clean, CV8w_clean, CV8Y_clean)
+
+# Removing individual datasets
+rm(list = c("W9_clean", "W9Y_clean", "W10_clean", "W10Y_clean", "CV1w_clean", "CV2w_clean", "CV2t_clean", "CV3w_clean",  "CV4w_clean", "CV4Y_clean", "CV5w_clean", "CV6w_clean", "CV6t_clean", "CV6Y_clean", "CV7w_clean", "CV8w_clean", "CV8Y_clean"))
+```
+
+# Stable characteristics
+The downloaded data include the file `ukhls_wx/xwavedat.tab`, which indexes the stable characteristics (e.g. sex, birth year, ethnic background) of the participants. These are already checked for consistency and are therefore preferred - so we join the sex, birth year and ethnic background data to the dataset. Sex is recoded such that 0 is male and 1 is female.
+
+```{r stable}
+# Reading stable characteristics data
+data_stable <- read.delim("Data/Raw/Main_survey/UKDA-6614-tab/tab/ukhls_wx/xwavedat.tab", quote = "")
+
+# Defining NAs
+is.na(data_stable[,]) <- data_stable[,] < 0
+
+# Creating a variable to encompass all participant IDs regardless of participant type
+data_prov %<>% mutate(pidp = if_else(is.na(pidp), pidp_c, pidp))
+
+# Selecting participant ID, sex, birth year and ethnic background
+data_stable %<>% dplyr::select(pidp, sex_dv, birthy, ethn_dv)
+
+# Joining to existing data
+data_full <- left_join(data_prov, data_stable, by = "pidp")
+
+# Rendering inconsistent sex_dv values as NA
+is.na(data_full$sex_dv) <- data_full$sex_dv == 0
+
+# Checking chsex values for consistency
+data_full <- data_full %>% group_by(pidp) %>% mutate(chsex = ifelse(length(unique(chsex)) == 1, unique(chsex), NA))
+
+# Merging chsex into sex_dv where sex_dv is not available
+data_full %<>% mutate(sex_merged = sex_dv)
+
+data_full[is.na(data_full$sex_dv),]$sex_merged <- data_full[is.na(data_full$sex_dv),]$chsex
+
+# Converting sex to a factor variable so it is not treated as continuous (0 is male, 1 is female)
+data_full %<>% mutate(sex_merged = recode(sex_merged, `1` = 0L, `2` = 1L))
+
+# Removing stable characteristics dataset & provisional dataset
+rm(list = c("data_stable", "data_prov"))
+
+# Infilling missing values for stable characteristics
+data_full <- data_full %>%
+  mutate(i_hidp = if_else(wave == "W9" & !is.na(hidp), hidp, i_hidp)) %>%
+  mutate(j_hidp = if_else(wave == "W10" & !is.na(hidp), hidp, j_hidp)) %>%
+  group_by(pidp) %>%
+  fill(i_hidp, j_hidp, ageon20200815, birthy, sex_merged, ethn_dv, ypschlth1, ypschlth2, .direction = "downup")
+
+# Renaming W9 household income variable for consistency
+names(W9hh_clean) <- str_replace(names(W9hh_clean), "i_fihhmnnet1_dv", "fihhmnnet1_dv")
+
+# Merging W9 household income data into dataset
+data_W9 <- data_full[data_full$wave == "W9",]
+data_W9 <- left_join(data_W9, W9hh_clean, by = "i_hidp")
+data_full <- data_full[data_full$wave != "W9",]
+data_full <- dplyr::bind_rows(data_full, data_W9)
+
+# Infilling household income within households
+data_full[!is.na(data_full$i_hidp),] <- data_full[!is.na(data_full$i_hidp),] %>% group_by(i_hidp, wave) %>% fill(hhincome_amount, hhincome_period, .direction = "downup")
+data_full[!is.na(data_full$j_hidp),] <- data_full[!is.na(data_full$j_hidp),] %>% group_by(j_hidp, wave) %>% fill(hhincome_amount, hhincome_period, .direction = "downup")
+
+# Removing W9 household dataset
+rm(W9hh_clean)
+```
+
+# Saving the long dataset
+
+```{r save_data}
+write_csv(data_full, file = "Data/Cleaned/data.csv")
+```
+
+# Making data wide again
+For longitudinal analyses, it is more convenient for the data to be in "wide" format. So we create such a dataset. Where stable characteristics are only provided for certain waves, we copy the values over so that no participant has multiple rows once duplicate rows are removed.
+
+```{r wide}
+data_wide <- data_full %>%
+  
+  # Widening dataset
+  pivot_wider(id_cols = c(pidp, wave), names_from = wave, values_from = !(pidp | pidp_c | pidp | pidpcorrected | sex_merged | ethn_dv | ageon20200815 | birthy | wave | i_hidp | j_hidp | ypschlth1 | ypschlth2), values_fill = NA) %>% 
+  
+  # Removing rows with no data at all
+  select_if(function(x) !all(is.na(x))) %>%
+  
+  # Joining stable characteristics
+  left_join(data_full %>% dplyr::select(pidp, sex_merged, ethn_dv, ageon20200815, birthy, i_hidp, j_hidp, ypschlth1, ypschlth2)) %>%
+  
+  # Removing duplicate rows
+  distinct() %>%
+  
+  # Calculating COVID monthly household income from amounts and reference periods 
+  mutate(
+    hhincome_CV4_mutate = case_when(
+      hhincome_period_CV4 %in% c(1, 5) ~ hhincome_amount_CV4 * 365/84,
+      hhincome_period_CV4 == 2 ~ hhincome_amount_CV4 * 365/168,
+      hhincome_period_CV4 == 3 ~ hhincome_amount_CV4,
+      hhincome_period_CV4 == 4 ~ hhincome_amount_CV4 / 12
+    ),
+    hhincome_CV6_mutate = case_when(
+      hhincome_period_CV6 %in% c(1, 5) ~ hhincome_amount_CV6 * 365/84,
+      hhincome_period_CV6 == 2 ~ hhincome_amount_CV6 * 365/168,
+      hhincome_period_CV6 == 3 ~ hhincome_amount_CV6,
+      hhincome_period_CV6 == 4 ~ hhincome_amount_CV6 / 12
+    ),
+    hhincome_CV8_mutate = case_when(
+      hhincome_period_CV8 %in% c(1, 5) ~ hhincome_amount_CV8 * 365/84,
+      hhincome_period_CV8 == 2 ~ hhincome_amount_CV8 * 365/168,
+      hhincome_period_CV8 == 3 ~ hhincome_amount_CV8,
+      hhincome_period_CV8 == 4 ~ hhincome_amount_CV8 / 12
+    )
+  ) %>%
+
+# Calculating mean monthly household income across waves
+  rowwise() %>% 
+  mutate(mean_income = mean(c(fihhmnnet1_dv_W9, hhincome_CV4_mutate, hhincome_CV6_mutate, hhincome_CV8_mutate), na.rm = TRUE))
+```
+
+# Saving the wide dataset
+
+``` {r save_wide_data}
+write_csv(data_wide, file = "Data/Cleaned/data_wide.csv")
+```
